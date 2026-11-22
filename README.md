@@ -6,6 +6,9 @@ Zygisk 模块（基于 [AndroidVMTools](https://github.com/aerath-stuff/AndroidV
 测试环境：CPH2723 / ColorOS 16.0.2 / Android 16。系统里该功能的入口和逻辑已删除，但底层的 Mirage 虚拟屏
 （`OplusMirageWindowManager`，castMode 7 保活屏，GameBounce 也用它）还在，本模块直接复用。
 
+> **不支持 ColorOS 17**：本仓库缺乏 ColorOS 17 的测试条件，无法适配。ColorOS 17 用户请使用
+> [Mubai-meng/ColorOS_BackgroundSide](https://github.com/Mubai-meng/ColorOS_BackgroundSide)。
+
 ## 效果
 
 - 小窗最小化成边缘气泡（菜单、标题栏、手势、打开别的小窗时自动收起，任何方式都算）就是挂机：

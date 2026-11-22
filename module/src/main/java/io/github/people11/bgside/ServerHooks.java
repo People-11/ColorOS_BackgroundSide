@@ -18,6 +18,7 @@ import android.view.Display;
 import android.view.SurfaceControl;
 
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +42,8 @@ final class ServerHooks {
     private static final Map<Integer, Hang> hung = new ConcurrentHashMap<>();
     /** Inside the stock bubble restore. */
     private static final Set<Integer> restoring = ConcurrentHashMap.newKeySet();
+    /** uid -> hung tasks holding its frame rate override. */
+    private static final Map<Integer, Integer> fpsPins = new ConcurrentHashMap<>();
 
     private static Handler handler;
     private static ClassLoader loader;
@@ -67,7 +70,13 @@ final class ServerHooks {
             H.hook(toFloat, "handleEvent", a -> {
                 int id = H.get(H.get(a.getReference(0), "mTask"), "mTaskId");
                 Hang h = new Hang();
-                if (hung.putIfAbsent(id, h) != null) return false;
+                Hang prev = hung.putIfAbsent(id, h);
+                if (prev != null) {
+                    if (!prev.moved) return false;
+                    // A moved task can't be minimized again unless it left our display by a path we missed.
+                    unhang(id, "stale");
+                    if (hung.putIfAbsent(id, h) != null) return false;
+                }
                 Log.d(TAG, "minimizing task " + id);
                 handler.post(() -> prepare(id, h, 0));
                 handler.postDelayed(() -> {
@@ -107,7 +116,7 @@ final class ServerHooks {
                 h.uid = H.get(task, "effectiveUid");
                 h.moved = true;
                 Log.i(TAG, "hanging task " + id + " (" + h.pkg + ") on display " + h.display);
-                setFps(h.uid, HANG_FPS);
+                pinFps(h.uid);
                 withDeferredVisibility(() -> {
                     original.call();
                     Object root = rootWindowContainer();
@@ -187,7 +196,11 @@ final class ServerHooks {
                 Hang h = hung.get(id);
                 if (!unhang(id, "bubble removed")) return;
                 handler.post(() -> {
-                    if (isTaskOnDisplay(id, h.display)) moveBack(id);
+                    try {
+                        if (isTaskOnDisplay(id, h.display)) moveBack(id);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "move back of task " + id + " failed", t);
+                    }
                 });
             });
 
@@ -231,10 +244,41 @@ final class ServerHooks {
         Hang h = hung.remove(taskId);
         if (h == null) return false;
         Log.i(TAG, "unhang task " + taskId + ": " + why);
-        if (h.moved) setFps(h.uid, 0f);
+        if (h.moved) unpinFps(h.uid);
         int d = h.display;
-        if (d != INVALID_DISPLAY) handler.postDelayed(() -> mirage("releaseVirtualDisplayDevice", d), RELEASE_DELAY_MS);
+        if (d != INVALID_DISPLAY) handler.postDelayed(() -> {
+            try {
+                forgetTasksThatLeft(d);
+                mirage("releaseVirtualDisplayDevice", d);
+            } catch (Throwable t) {
+                // Uncaught on our thread would crash system_server.
+                Log.e(TAG, "release display " + d + " failed", t);
+            }
+        }, RELEASE_DELAY_MS);
         return true;
+    }
+
+    /**
+     * Mirage forgets a display's task only on stack removal, and releasing the display makeInvisible()s and hides
+     * every task it still lists, including restored ones already back on display 0.
+     */
+    private static void forgetTasksThatLeft(int d) throws ReflectiveOperationException {
+        synchronized ((Object) H.get(H.get(mirageService(), "mAtms"), "mGlobalLock")) {
+            Object display = H.call(H.get(mirageService(), "mWindowController"), "getDevice", d);
+            if (display == null) return;
+            for (Object id : new ArrayList<>((Set<?>) H.call(display, "getTasks"))) {
+                if (!isTaskOnDisplay((Integer) id, d)) H.call(display, "removeTask", id);
+            }
+        }
+    }
+
+    /** The override is per uid: two hung tasks of one app share it. */
+    private static void pinFps(int uid) {
+        if (uid >= 0 && fpsPins.merge(uid, 1, Integer::sum) == 1) setFps(uid, HANG_FPS);
+    }
+
+    private static void unpinFps(int uid) {
+        if (uid >= 0 && fpsPins.computeIfPresent(uid, (k, n) -> n > 1 ? n - 1 : null) == null) setFps(uid, 0f);
     }
 
     private static boolean isOurDisplay(int d) {
