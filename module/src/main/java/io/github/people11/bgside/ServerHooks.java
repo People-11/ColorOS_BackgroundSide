@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -17,11 +18,15 @@ import android.util.Log;
 import android.view.Display;
 import android.view.SurfaceControl;
 
+import com.v7878.unsafe.Reflection;
+
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /** system_server side: every minimize to the bubble moves the task to its own Mirage keep-alive display. */
 final class ServerHooks {
@@ -197,7 +202,7 @@ final class ServerHooks {
                 if (!unhang(id, "bubble removed")) return;
                 handler.post(() -> {
                     try {
-                        if (isTaskOnDisplay(id, h.display)) moveBack(id);
+                        if (isTaskOnDisplay(id, h.display)) moveBack(id, false);
                     } catch (Throwable t) {
                         Log.e(TAG, "move back of task " + id + " failed", t);
                     }
@@ -234,8 +239,14 @@ final class ServerHooks {
         }
     }
 
+    /** For a start from home / recents, which brings the task to front right after. */
     private static void leaveHang(int taskId, String why) {
-        moveBack(taskId);
+        long ident = Binder.clearCallingIdentity(); // else surface placement in the move fails the caller's WAKE_LOCK check
+        try {
+            moveBack(taskId, true);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
         unhang(taskId, why);
     }
 
@@ -368,8 +379,14 @@ final class ServerHooks {
         }
     }
 
-    /** Back to display 0 as a plain hidden full-screen background task (what Mirage's move-in used to leave). */
-    private static void moveBack(int taskId) {
+    /**
+     * Back to display 0 as a plain hidden full-screen background task (what Mirage's move-in used to leave).
+     *
+     * @param launching hide the activities first, so Mirage's makeInvisible() is a no-op: it queues a stop for the
+     *                  still-RESUMED activity that the start never takes back (resumeTopActivity returns early for a
+     *                  resumed top), so the next idle stops it unless the launch transition holds it by then.
+     */
+    private static void moveBack(int taskId, boolean launching) {
         try {
             Object root = rootWindowContainer();
             synchronized ((Object) H.get(H.get(mirageService(), "mAtms"), "mGlobalLock")) {
@@ -380,9 +397,22 @@ final class ServerHooks {
                             loader.loadClass("com.android.server.wm.FlexibleWindowManagerService"), "getInstance", (Object) null);
                     H.call(H.call(fwms, "getFlexibleTaskController"), "resetFlexibleTaskToFullScreen", task);
                 }
+                if (task != null && launching) {
+                    Method hide = H.method(loader.loadClass("com.android.server.wm.ActivityRecord"), "setVisibility", 1);
+                    Method forAll = Reflection.getHiddenMethod(
+                            loader.loadClass("com.android.server.wm.WindowContainer"), "forAllActivities", Consumer.class);
+                    forAll.setAccessible(true);
+                    forAll.invoke(task, (Consumer<Object>) r -> {
+                        try {
+                            if (H.<Boolean>get(r, "mVisibleRequested")) hide.invoke(r, false);
+                        } catch (ReflectiveOperationException e) {
+                            throw new IllegalStateException(e);
+                        }
+                    });
+                }
             }
         } catch (ReflectiveOperationException e) {
-            Log.e(TAG, "flexible reset for task " + taskId + " failed", e);
+            Log.e(TAG, "flexible reset / hide for task " + taskId + " failed", e);
         }
         moveSync(taskId, Display.DEFAULT_DISPLAY);
     }
