@@ -46,8 +46,6 @@ final class ServerHooks {
     }
 
     private static final Map<Integer, Hang> hung = new ConcurrentHashMap<>();
-    /** Inside the stock bubble restore. */
-    private static final Set<Integer> restoring = ConcurrentHashMap.newKeySet();
     /** uid -> hung tasks holding its frame rate override. */
     private static final Map<Integer, Integer> fpsPins = new ConcurrentHashMap<>();
     /** uid of the top resumed activity when it is outside our displays (its override is lifted meanwhile). */
@@ -71,7 +69,6 @@ final class ServerHooks {
             Class<?> starter = cl.loadClass("com.android.server.wm.ActivityStarter");
             Class<?> atms = cl.loadClass("com.android.server.wm.ActivityTaskManagerService");
             Class<?> supervisor = cl.loadClass("com.android.server.wm.ActivityTaskSupervisor");
-            Class<?> tcn = cl.loadClass("com.android.server.wm.TaskChangeNotificationController");
             Class<?> keepAlive = cl.loadClass("com.android.server.wm.OplusMirageKeepAlivePolicy");
             Class<?> displayContent = cl.loadClass("com.android.server.wm.DisplayContent");
 
@@ -150,16 +147,6 @@ final class ServerHooks {
                 config.colorMode = main.colorMode;
             });
 
-            // Bubble tap: the stock restore moves tasks off VIRTUAL displays itself, then uses startActivityFromRecents.
-            H.hook(fhc, "startActivityByFloatInfo", a -> {
-                restoring.add(H.get(a.getReference(1), "taskId"));
-                return false;
-            }, a -> {
-                int id = H.get(a.getReference(1), "taskId");
-                restoring.remove(id);
-                unhang(id, "restored from bubble");
-            });
-
             // The restore would cover the live app with its stale minimize-time snapshot until ~1 s after opening.
             H.hook(infoManager, "isSkipRecordSnapshot", a -> {
                 if (hung.isEmpty()) return false;
@@ -169,10 +156,13 @@ final class ServerHooks {
                 return true;
             }, null);
 
-            // The open animation's first frame leaves the leash uncropped, so the live app peeks out below the bubble.
+            // Bubble tap: the stock restore moves the task back itself, then its open animation removes the bubble
+            // (ending the hang below). That animation's first frame leaves the leash uncropped, so the live app peeks out
+            // below the bubble. (Also the minimize animation's start, before the task is moved.)
             H.hook(openAnimSpec, "defaultCallAnimationStart", a -> {
                 Object spec = a.getReference(0);
-                if (!restoring.contains((int) H.get(H.get(spec, "mAnimTask"), "mTaskId"))) return false;
+                Hang h = hung.get((int) H.get(H.get(spec, "mAnimTask"), "mTaskId"));
+                if (h == null || !h.moved) return false;
                 SurfaceControl.Transaction t = a.getReference(1);
                 t.setCrop(H.<SurfaceControl>get(spec, "mTaskAnimLeash"), new Rect(0, 0, 1, 1));
                 return false;
@@ -187,19 +177,19 @@ final class ServerHooks {
                 String pkg = intent.getComponent().getPackageName();
                 // shortcut: matches by package only, so a clone app's launch also ends the hang.
                 for (var e : hung.entrySet()) {
-                    if (e.getValue().moved && pkg.equals(e.getValue().pkg)) leaveHang(e.getKey(), "launched from home");
+                    if (pkg.equals(e.getValue().pkg) && isHungHere(e.getKey())) leaveHang(e.getKey(), "launched from home");
                 }
                 return false;
             }, null);
 
+            // Also the bubble restore's start, by then already moved back by stock.
             H.hook(supervisor, "startActivityFromRecents", a -> {
                 int id = a.getInt(3);
-                Hang h = hung.get(id);
-                if (h != null && h.moved && !restoring.contains(id)) leaveHang(id, "launched from recents");
+                if (isHungHere(id)) leaveHang(id, "launched from recents");
                 return false;
             }, null);
 
-            // Bubble dismissed.
+            // Bubble gone: dismissed, tapped (restore) or its task removed (stock removes the bubble then).
             H.hook(fhc, "dispatchViewRemoved", null, a -> {
                 int id = H.get(a.getReference(2), "taskId");
                 Hang h = hung.get(id);
@@ -219,11 +209,6 @@ final class ServerHooks {
                 Object r = a.getReference(1);
                 int uid = H.<ActivityInfo>get(r, "info").applicationInfo.uid;
                 setFront(isOurDisplay(H.call(H.get(r, "task"), "getDisplayId")) ? -1 : uid);
-                return false;
-            }, null);
-
-            H.hook(tcn, "notifyTaskRemoved", a -> {
-                unhang(a.getInt(1), "task removed");
                 return false;
             }, null);
 
@@ -312,6 +297,12 @@ final class ServerHooks {
         frontUid = uid;
         if (fpsPins.containsKey(old)) setFps(old, HANG_FPS);
         if (fpsPins.containsKey(uid)) setFps(uid, 0f);
+    }
+
+    /** Moved and still on its display. */
+    private static boolean isHungHere(int taskId) {
+        Hang h = hung.get(taskId);
+        return h != null && h.moved && isTaskOnDisplay(taskId, h.display);
     }
 
     private static boolean isOurDisplay(int d) {

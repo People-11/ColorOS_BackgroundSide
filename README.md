@@ -25,11 +25,10 @@ Zygisk 模块（基于 [AndroidVMTools](https://github.com/aerath-stuff/AndroidV
 | `FlexibleTaskController.exitFlexibleTask` | 原生最小化收尾时，在同一个推迟可见性的区间里把任务移到虚拟屏（直接用 WM 的移屏，保留小窗状态：尺寸不变、边框保持隐藏），焦点留在主屏 |
 | `OplusMirageKeepAlivePolicy.shouldSleep` | 我们的虚拟屏不随主屏休眠 |
 | `DisplayContent.computeScreenConfiguration` | 虚拟屏的触屏/色彩模式配置与主屏一致，避免 Chrome 等重建 Activity |
-| `FloatHandleController.startActivityByFloatInfo` | 点气泡：原生恢复自带“虚拟屏任务移回主屏”，之后解除挂机 |
 | `OplusFlexibleInfoManager.isSkipRecordSnapshot` | 恢复动画不盖最小化时的旧快照（否则画面冻结 1~2 秒） |
-| `FlexibleFloatHandleAnimationSpec.defaultCallAnimationStart` | 恢复动画第一帧把动画层裁空，避免挂机应用的画面在气泡下方露出一帧 |
+| `FlexibleFloatHandleAnimationSpec.defaultCallAnimationStart` | 点气泡（原生恢复自带“虚拟屏任务移回主屏”）：恢复动画第一帧把动画层裁空，避免挂机应用的画面在气泡下方露出一帧 |
 | `ActivityStarter.execute` / `ActivityTaskSupervisor.startActivityFromRecents` | 从桌面/最近任务打开：启动前先移回主屏，原生启动动画才正常。移屏前先自行隐藏其 Activity，使 Mirage 移屏里的 `makeInvisible()` 不再把仍 RESUMED 的 Activity 加入待停止队列（否则下次 idle 可能被停止，Chrome 等停止媒体播放） |
-| `FloatHandleController.dispatchViewRemoved` / `TaskChangeNotificationController.notifyTaskRemoved` | 气泡被关掉、任务被移除：解除挂机 |
+| `FloatHandleController.dispatchViewRemoved` | 气泡消失时解除挂机：被关掉、点开恢复、或任务被移除（原生随之移除气泡） |
 | `ActivityTaskManagerService.setLastResumedActivityUncheckLocked` | 挂机应用的其他界面（如别的应用里打开的 Chrome Custom Tab）成为前台时临时解除降帧，离开前台后恢复 |
 
 降帧用 SurfaceFlinger 的按 uid 帧率覆盖后门（transaction 1039）。GameManager 的覆盖会被 1035 强制刷新率忽略，1039 不会。
