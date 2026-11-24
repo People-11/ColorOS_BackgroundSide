@@ -28,10 +28,12 @@ Zygisk 模块（基于 [AndroidVMTools](https://github.com/aerath-stuff/AndroidV
 | `FloatHandleController.startActivityByFloatInfo` | 点气泡：原生恢复自带“虚拟屏任务移回主屏”，之后解除挂机 |
 | `OplusFlexibleInfoManager.isSkipRecordSnapshot` | 恢复动画不盖最小化时的旧快照（否则画面冻结 1~2 秒） |
 | `FlexibleFloatHandleAnimationSpec.defaultCallAnimationStart` | 恢复动画第一帧把动画层裁空，避免挂机应用的画面在气泡下方露出一帧 |
-| `ActivityStarter.execute` / `ActivityTaskSupervisor.startActivityFromRecents` | 从桌面/最近任务打开：启动前先移回主屏，原生启动动画才正常 |
+| `ActivityStarter.execute` / `ActivityTaskSupervisor.startActivityFromRecents` | 从桌面/最近任务打开：启动前先移回主屏，原生启动动画才正常。移屏前先自行隐藏其 Activity，使 Mirage 移屏里的 `makeInvisible()` 不再把仍 RESUMED 的 Activity 加入待停止队列（否则下次 idle 可能被停止，Chrome 等停止媒体播放） |
 | `FloatHandleController.dispatchViewRemoved` / `TaskChangeNotificationController.notifyTaskRemoved` | 气泡被关掉、任务被移除：解除挂机 |
+| `ActivityTaskManagerService.setLastResumedActivityUncheckLocked` | 挂机应用的其他界面（如别的应用里打开的 Chrome Custom Tab）成为前台时临时解除降帧，离开前台后恢复 |
 
 降帧用 SurfaceFlinger 的按 uid 帧率覆盖后门（transaction 1039）。GameManager 的覆盖会被 1035 强制刷新率忽略，1039 不会。
+覆盖按 uid 生效，会波及该应用在主屏上的其他窗口，所以只在它们成为前台时解除；可见但不在焦点上的（分屏另一侧等）仍是 10 fps。
 
 ## 构建
 

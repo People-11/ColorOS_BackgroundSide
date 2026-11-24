@@ -4,6 +4,7 @@ import static io.github.people11.bgside.H.TAG;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
@@ -49,6 +50,8 @@ final class ServerHooks {
     private static final Set<Integer> restoring = ConcurrentHashMap.newKeySet();
     /** uid -> hung tasks holding its frame rate override. */
     private static final Map<Integer, Integer> fpsPins = new ConcurrentHashMap<>();
+    /** uid of the top resumed activity when it is outside our displays (its override is lifted meanwhile). */
+    private static int frontUid = -1;
 
     private static Handler handler;
     private static ClassLoader loader;
@@ -66,6 +69,7 @@ final class ServerHooks {
             Class<?> infoManager = cl.loadClass("com.android.server.wm.OplusFlexibleInfoManager");
             Class<?> openAnimSpec = cl.loadClass("com.android.server.wm.FlexibleFloatHandleAnimationSpec");
             Class<?> starter = cl.loadClass("com.android.server.wm.ActivityStarter");
+            Class<?> atms = cl.loadClass("com.android.server.wm.ActivityTaskManagerService");
             Class<?> supervisor = cl.loadClass("com.android.server.wm.ActivityTaskSupervisor");
             Class<?> tcn = cl.loadClass("com.android.server.wm.TaskChangeNotificationController");
             Class<?> keepAlive = cl.loadClass("com.android.server.wm.OplusMirageKeepAlivePolicy");
@@ -209,6 +213,15 @@ final class ServerHooks {
                 });
             });
 
+            // The override is per uid, so it also slows the app's activities elsewhere (Chrome's Custom Tab inside
+            // another app): lift it while one of them is the top resumed activity.
+            H.hook(atms, "setLastResumedActivityUncheckLocked", a -> {
+                Object r = a.getReference(1);
+                int uid = H.<ActivityInfo>get(r, "info").applicationInfo.uid;
+                setFront(isOurDisplay(H.call(H.get(r, "task"), "getDisplayId")) ? -1 : uid);
+                return false;
+            }, null);
+
             H.hook(tcn, "notifyTaskRemoved", a -> {
                 unhang(a.getInt(1), "task removed");
                 return false;
@@ -284,12 +297,21 @@ final class ServerHooks {
     }
 
     /** The override is per uid: two hung tasks of one app share it. */
-    private static void pinFps(int uid) {
+    private static synchronized void pinFps(int uid) {
+        if (uid == frontUid) frontUid = -1; // the minimized task itself: no longer in front
         if (uid >= 0 && fpsPins.merge(uid, 1, Integer::sum) == 1) setFps(uid, HANG_FPS);
     }
 
-    private static void unpinFps(int uid) {
+    private static synchronized void unpinFps(int uid) {
         if (uid >= 0 && fpsPins.computeIfPresent(uid, (k, n) -> n > 1 ? n - 1 : null) == null) setFps(uid, 0f);
+    }
+
+    private static synchronized void setFront(int uid) {
+        int old = frontUid;
+        if (old == uid) return;
+        frontUid = uid;
+        if (fpsPins.containsKey(old)) setFps(old, HANG_FPS);
+        if (fpsPins.containsKey(uid)) setFps(uid, 0f);
     }
 
     private static boolean isOurDisplay(int d) {
